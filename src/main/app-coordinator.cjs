@@ -344,6 +344,18 @@ function createAppCoordinatorClass({
         });
         this.codexTranscriptWatcher.start();
         log.info("[AppCoordinator] codex transcript watcher started");
+        // 启动回填：codex 可能几小时不完成一轮，若只挂在 sessionCompleted 上，
+        // 统计里会长期停在 0。watcher 扫的是 24h 内的 rollout，逐个采集一次；
+        // applyBaselineDiff 用累计值差分，重复回填不会重复计数。
+        setTimeout(() => {
+          const tracked = this.codexTranscriptWatcher?.listTracked() ?? [];
+          for (const f of tracked) {
+            collectAndReportTokens("codex", f.sessionId, f.path).catch((err) => {
+              log.warn("[AppCoordinator] codex token backfill failed:", err?.message ?? err);
+            });
+          }
+          if (tracked.length) log.info("[AppCoordinator] codex token backfill: %d file(s)", tracked.length);
+        }, 5e3);
       } catch (err) {
         // watcher 启动失败不应阻断 app 启动；hook 通道仍可工作
         log.warn("[AppCoordinator] codex transcript watcher failed to start:", err.message);

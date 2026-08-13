@@ -335,7 +335,7 @@ function PetApp() {
   return /* @__PURE__ */ React.createElement(
     "div",
     {
-      className: `pet-root${panelOpen ? " is-panel-open" : ""}`,
+      className: `pet-root${panelOpen ? " is-panel-open" : ""}${echoMode ? " is-echo" : ""}`,
       "data-direction": panelDirection,
       style: {
         "--pet-size": `${petSize}px`,

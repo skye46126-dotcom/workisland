@@ -96,6 +96,11 @@ function PetApp() {
       if (!window.petBridge?.getSpritePath) return;
       try {
         const result = await window.petBridge.getSpritePath(fileName);
+        // 初始调用不带 fileName，主进程按设置解析 —— echo 模式经返回值标记回传
+        if (result?.echoMode) {
+          setEchoMode(true);
+          return;
+        }
         const url = typeof result === "string" ? result : result?.dataUrl;
         if (url) setSpriteUrl(url);
       } catch (error) {

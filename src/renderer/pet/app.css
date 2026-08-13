@@ -961,4 +961,9 @@ body {
 .pet-echo {
   position: relative;
   margin: 0 auto;
+  cursor: grab;
+}
+
+.pet-echo:active {
+  cursor: grabbing;
 }

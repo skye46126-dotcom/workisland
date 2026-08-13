@@ -243,13 +243,18 @@ function createAppCoordinatorClass({
           // turn 结束采集一次 token。挂在 sessionCompleted 而不是 hookProcessed：
           // 后者每个 hook 都触发，反复整读大 transcript 太重。
           // codex 的 transcript 路径复用 codexSessionMeta（sweep 机制已在维护）。
+          // codex：hook 的 transcript_path 经常缺席（codexSessionMeta 为空），
+          // 但 transcript watcher 本来就按 session id 跟踪着 rollout 文件，用它兜底。
           const tp = event.tool === "claude"
             ? this.claudeTranscriptPaths.get(event.sessionId)
-            : this.codexSessionMeta.get(event.sessionId)?.transcriptPath;
+            : this.codexSessionMeta.get(event.sessionId)?.transcriptPath
+              ?? this.codexTranscriptWatcher?.getTranscriptPath(event.sessionId);
           if (tp) {
             collectAndReportTokens(event.tool, event.sessionId, tp).catch((err) => {
               log.warn("[AppCoordinator] %s token collect failed:", event.tool, err?.message ?? err);
             });
+          } else {
+            log.info("[TokenCollector] 跳过：%s/%s 无 transcript 路径可用", event.tool, event.sessionId);
           }
         }
         if (shouldRecordCompletedSessionStat(event)) {

@@ -363,7 +363,9 @@ function PetApp() {
       echoMode
         ? /* @__PURE__ */ React.createElement(
             "div",
-            { className: "pet-echo", style: { width: petSize, pointerEvents: "none" } },
+            // 不能 pointer-events:none：LittleEcho 根节点是 0×0 绝对定位锚点，
+            // 容器高度全靠这个盒子撑起 —— 它还得接住 mousedown 冒泡给容器做拖动。
+            { className: "pet-echo", style: { width: petSize, height: Math.round(petSize * 432 / 1034) } },
             /* @__PURE__ */ React.createElement(LittleEcho, {
               // 桌宠七态 → Echo 情绪/动作。echoFrame 仅用于触发重渲染，
               // 组件内部经 __setFrame 读全局帧号。

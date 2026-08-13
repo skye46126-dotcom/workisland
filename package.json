@@ -1,0 +1,20 @@
+{
+  "name": "workisland",
+  "productName": "WorkIsland",
+  "version": "0.2.7",
+  "description": "macOS 本地 Work Agent 工作状态与注意力路由器",
+  "private": true,
+  "main": "./src/main/index.cjs",
+  "author": "WorkIsland contributors",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "npm@11.11.1",
+  "dependencies": {
+    "@electron-toolkit/utils": "4.0.0",
+    "@iarna/toml": "2.2.5",
+    "electron-log": "5.4.4",
+    "js-yaml": "4.3.1"
+  }
+}

@@ -1,0 +1,215 @@
+#!/usr/bin/env node
+"use strict";
+
+const net = require("node:net");
+const os = require("node:os");
+const path = require("node:path");
+
+const TERMINAL_APP_ALIASES = Object.freeze({
+  apple_terminal: "Terminal",
+  "iterm.app": "iTerm",
+  iterm: "iTerm",
+  warp: "Warp",
+  warpterminal: "Warp",
+  vscode: "VS Code",
+  "vs code": "VS Code",
+  ghostty: "Ghostty",
+  wezterm: "WezTerm",
+  alacritty: "Alacritty",
+  kitty: "kitty",
+  cmux: "cmux"
+});
+
+function canonicalTerminalApp(value) {
+  if (typeof value !== "string" || !value.trim()) return undefined;
+  const normalized = value.trim().toLowerCase();
+  return TERMINAL_APP_ALIASES[normalized] || value.trim();
+}
+
+// 顺序有意义：先匹配到的先返回，所以更具体的放前面。
+const HOST_APP_MATCHERS = [
+  ["/claude.app/", "Claude"],
+  ["/cursor.app/", "Cursor"],
+  ["/windsurf.app/", "Windsurf"],
+  ["/trae cn.app/", "Trae CN"],
+  ["/trae.app/", "Trae"],
+  ["/ghostty.app/", "Ghostty"],
+  ["/iterm.app/", "iTerm"],
+  ["/terminal.app/", "Terminal"],
+  ["/warp.app/", "Warp"],
+  ["/wezterm.app/", "WezTerm"],
+  ["/alacritty.app/", "Alacritty"],
+  ["/kitty.app/", "kitty"],
+  ["/visual studio code.app/", "VS Code"],
+];
+
+/**
+ * 沿进程树上溯，找出承载本次会话的终端 / 宿主 App。
+ *
+ * 这是 TERM_PROGRAM 之外必需的兜底：Claude Code 跑在 Claude Desktop 里时
+ * TERM_PROGRAM 为空，此前 terminal_app 因此恒为 undefined，
+ * bridge-server 拿不到 app 就直接 return，jumpTarget 永远不会生成 ——
+ * 连带导致「点击无法跳转」和「进程结束后不自动停止」两个问题。
+ * hooks-plugins.cjs 早就有这个回退，CLI hook 这份漏了。
+ */
+function detectHostAppFromProcessTree() {
+  try {
+    const { execSync } = require("child_process");
+    const raw = execSync("/bin/ps -Ao pid=,ppid=,command=", {
+      timeout: 500,
+      stdio: ["pipe", "pipe", "pipe"]
+    }).toString();
+    const procs = new Map();
+    for (const line of raw.split("\n")) {
+      const m = line.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/);
+      if (m) procs.set(m[1], { ppid: m[2], command: m[3] });
+    }
+    let pid = String(process.ppid);
+    const seen = new Set();
+    while (pid && pid !== "0" && pid !== "1" && !seen.has(pid)) {
+      seen.add(pid);
+      const p = procs.get(pid);
+      if (!p) break;
+      const low = p.command.toLowerCase();
+      for (const [needle, app] of HOST_APP_MATCHERS) {
+        if (low.includes(needle)) return app;
+      }
+      pid = p.ppid;
+    }
+  } catch {}
+  return undefined;
+}
+
+
+/**
+ * Add terminal context that Claude Code and Codex do not include in hook JSON.
+ * Warp exposes TERM_PROGRAM=WarpTerminal; keeping this metadata on the hook
+ * lets WorkIsland retain a reliable jump target even when no TTY is attached.
+ */
+function enrichTerminalContext(payload, env = process.env) {
+  const next = payload;
+  const terminalApp = canonicalTerminalApp(next.terminal_app)
+    || canonicalTerminalApp(env.TERM_PROGRAM)
+    || (env.WARP_CLI_AGENT_PROTOCOL_VERSION ? "Warp" : undefined)
+    || detectHostAppFromProcessTree();
+  if (terminalApp && !next.terminal_app) next.terminal_app = terminalApp;
+
+  const sessionId = env.WARP_SESSION_ID
+    || env.WARP_TAB_ID
+    || env.WARP_TERMINAL_SESSION_ID
+    || env.ITERM_SESSION_ID
+    || env.TERM_SESSION_ID
+    || env.CMUX_SURFACE_ID
+    || env.KITTY_WINDOW_ID;
+  if (sessionId && !next.terminal_session_id) next.terminal_session_id = sessionId;
+
+  const paneId = env.WARP_PANE_UUID || env.WARP_PANE_ID;
+  if (paneId && !next.warp_pane_uuid) next.warp_pane_uuid = paneId;
+  if (env.TMUX_PANE && !next.tmux_target) next.tmux_target = env.TMUX_PANE;
+  return next;
+}
+
+function readArg(name) {
+  const index = process.argv.indexOf(name);
+  return index >= 0 ? process.argv[index + 1] : undefined;
+}
+
+function readStdin() {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    process.stdin.on("data", (chunk) => {
+      size += chunk.length;
+      if (size > 10 * 1024 * 1024) {
+        reject(new Error("hook payload exceeds 10 MB"));
+        process.stdin.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    process.stdin.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    process.stdin.on("error", reject);
+  });
+}
+
+function enrichPayload(payload, eventName) {
+  const next = payload && typeof payload === "object" && !Array.isArray(payload) ? { ...payload } : {};
+  if (eventName && !next.hook_event_name && !next.event_type) next.hook_event_name = eventName;
+  next._hostname ??= os.hostname();
+  next._username ??= os.userInfo().username;
+  next._ipAddrs ??= [];
+  // The hook CLI is a short-lived child of the agent. Tracking the parent PID
+  // gives AppCoordinator's PidWatcher a safe completion fallback.
+  if (next.pid == null && typeof process.ppid === "number") {
+    next.pid = process.ppid;
+  }
+  if (process.env.SSH_CONNECTION) next._sshClient ??= process.env.SSH_CONNECTION;
+  return enrichTerminalContext(next);
+}
+
+function sendHook(socketPath, source, payload) {
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection(socketPath);
+    let buffer = "";
+    let commandSent = false;
+    const finish = (value) => {
+      socket.end();
+      resolve(value);
+    };
+    socket.on("data", (chunk) => {
+      buffer += chunk.toString("utf8");
+      let newline;
+      while ((newline = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, newline);
+        buffer = buffer.slice(newline + 1);
+        if (!line) continue;
+        let message;
+        try {
+          message = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (message.type === "hello" && !commandSent) {
+          commandSent = true;
+          socket.write(`${JSON.stringify({
+            type: "command",
+            command: { type: "processHook", source, payload }
+          })}\n`);
+          continue;
+        }
+        if (message.type === "response") finish(message.response);
+      }
+    });
+    socket.on("error", reject);
+    socket.on("close", () => {
+      if (!commandSent) reject(new Error("bridge closed before handshake"));
+    });
+  });
+}
+
+async function main() {
+  const source = readArg("--source");
+  if (!source) throw new Error("missing --source");
+  const eventName = readArg("--event");
+  const raw = await readStdin();
+  const payload = enrichPayload(raw.trim() ? JSON.parse(raw) : {}, eventName);
+  const socketPath = process.env.FLUX_SOCKET_PATH || path.join(os.homedir(), ".flux", "run", "bridge.sock");
+  const response = await sendHook(socketPath, source, payload);
+  if (response?.type === "hookDirective" && response.directive) {
+    process.stdout.write(`${JSON.stringify(response.directive)}\n`);
+  }
+}
+
+async function run() {
+  return main().catch((error) => {
+    if (process.env.FLUX_HOOKS_DEBUG === "1") {
+      process.stderr.write(`[flux-hooks] ${error.message}\n`);
+    }
+    // Hook transport failures must not block the agent's own workflow.
+    process.exitCode = 0;
+  });
+}
+
+if (require.main === module) void run();
+
+module.exports = { canonicalTerminalApp, enrichTerminalContext, enrichPayload, run };
